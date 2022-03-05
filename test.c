@@ -41,6 +41,10 @@
 #include <arpa/inet.h>
 #endif
 
+#ifdef HAVE_ASSERT_H
+#include <assert.h>
+#endif
+
 //
 // Leading zeros MUST be suppressed.
 // For example, 2001:0db8::0001 is not acceptable and must be represented as 2001 : db8::1
@@ -138,7 +142,8 @@ typedef struct {
     printf(__VA_ARGS__); \
     failed = true; \
     status->failed_count++; \
-    status->total_tests++
+    status->total_tests++; \
+    assert(false);
 
 #define TEST_PASSED(...) \
     status->total_tests++;
@@ -194,6 +199,51 @@ static void copy_test_data(ipv6_address_full_t* dst, const test_data_t* src) {
     dst->mask = src->mask;
 }
 
+
+// Function that is called by the address parser to report diagnostics
+static void test_parsing_diag_fn (
+        ipv6_diag_event_t event,
+        const ipv6_diag_info_t* info,
+        void* user_data)
+{
+    diag_test_capture_t* capture = (diag_test_capture_t*)user_data;
+
+    capture->event = event;
+    capture->message = info->message;
+    capture->calls++;
+}
+
+static const char *diag_event_to_str(ipv6_diag_event_t ev) {
+    switch (ev) {
+        case IPV6_DIAG_STRING_SIZE_EXCEEDED     : return "IPV6_DIAG_STRING_SIZE_EXCEEDED";
+        case IPV6_DIAG_INVALID_INPUT            : return "IPV6_DIAG_INVALID_INPUT";
+        case IPV6_DIAG_INVALID_INPUT_CHAR       : return "IPV6_DIAG_INVALID_INPUT_CHAR";
+        case IPV6_DIAG_TRAILING_ZEROES          : return "IPV6_DIAG_TRAILING_ZEROES";
+        case IPV6_DIAG_V6_BAD_COMPONENT_COUNT   : return "IPV6_DIAG_V6_BAD_COMPONENT_COUNT";
+        case IPV6_DIAG_V4_BAD_COMPONENT_COUNT   : return "IPV6_DIAG_V4_BAD_COMPONENT_COUNT";
+        case IPV6_DIAG_V6_COMPONENT_OUT_OF_RANGE: return "IPV6_DIAG_V6_COMPONENT_OUT_OF_RANGE";
+        case IPV6_DIAG_V4_COMPONENT_OUT_OF_RANGE: return "IPV6_DIAG_V4_COMPONENT_OUT_OF_RANGE";
+        case IPV6_DIAG_INVALID_PORT             : return "IPV6_DIAG_INVALID_PORT";
+        case IPV6_DIAG_INVALID_CIDR_MASK        : return "IPV6_DIAG_INVALID_CIDR_MASK";
+        case IPV6_DIAG_IPV4_REQUIRED_BITS       : return "IPV6_DIAG_IPV4_REQUIRED_BITS";
+        case IPV6_DIAG_IPV4_INCORRECT_POSITION  : return "IPV6_DIAG_IPV4_INCORRECT_POSITION";
+        case IPV6_DIAG_INVALID_BRACKETS         : return "IPV6_DIAG_INVALID_BRACKETS";
+        case IPV6_DIAG_INVALID_ABBREV           : return "IPV6_DIAG_INVALID_ABBREV";
+        case IPV6_DIAG_INVALID_DECIMAL_TOKEN    : return "IPV6_DIAG_INVALID_DECIMAL_TOKEN";
+        case IPV6_DIAG_INVALID_HEX_TOKEN        : return "IPV6_DIAG_INVALID_HEX_TOKEN";
+        default: return "UNKNOWN";
+    }
+}
+
+static void test_output_diag_fn (
+        ipv6_diag_event_t event,
+        const ipv6_diag_info_t* info,
+        void* user_data)
+{
+    printf("    DIAG: [%u] %s: %s from: '%s' pos %u\n",
+           event, diag_event_to_str(event), info->message, info->input, info->position);
+}
+
 //
 // CIDR positive tests:
 //
@@ -235,6 +285,12 @@ static void test_parsing (test_status_t* status) {
         { "[::1]:5678", { 0, 0, 0, 0, 0, 0, 0, 1 }, 5678, 0, IPV6_FLAG_HAS_PORT },
         { "1.2.3.4", { 0x102, 0x304, 0, 0, 0, 0, 0, 0 }, 0, 0, IPV6_FLAG_IPV4_COMPAT },
         { "1.2.3.4:5678", { 0x102, 0x304, 0, 0, 0, 0, 0, 0 }, 5678,0,  IPV6_FLAG_IPV4_COMPAT|IPV6_FLAG_HAS_PORT },
+        { "1", { 0x0000, 0x0001, 0, 0, 0, 0, 0, 0 }, 0, 0, IPV6_FLAG_IPV4_COMPAT },
+        { "1:5678", { 0x0000, 0x0001, 0, 0, 0, 0, 0, 0 }, 5678, 0, IPV6_FLAG_IPV4_COMPAT|IPV6_FLAG_HAS_PORT },
+        { "1.2", { 0x0100, 0x0002, 0, 0, 0, 0, 0, 0 }, 0, 0, IPV6_FLAG_IPV4_COMPAT },
+        { "1.2:5678", { 0x0100, 0x0002, 0, 0, 0, 0, 0, 0 }, 5678, 0, IPV6_FLAG_IPV4_COMPAT|IPV6_FLAG_HAS_PORT },
+        { "1.2.3", { 0x0102, 0x0003, 0, 0, 0, 0, 0, 0 }, 0, 0, IPV6_FLAG_IPV4_COMPAT },
+        { "1.2.3:5678", { 0x0102, 0x0003, 0, 0, 0, 0, 0, 0 }, 5678, 0, IPV6_FLAG_IPV4_COMPAT|IPV6_FLAG_HAS_PORT },
         { "127.0.0.1", { 0x7f00, 0x0001, 0, 0, 0, 0, 0, 0 }, 0, 0, IPV6_FLAG_IPV4_COMPAT },
         { "255.255.255.255", { 0xffff, 0xffff, 0, 0, 0, 0, 0, 0 }, 0, 0, IPV6_FLAG_IPV4_COMPAT },
         { "255.255.255.255:65123", { 0xffff, 0xffff, 0, 0, 0, 0, 0, 0 }, 65123, 0, IPV6_FLAG_IPV4_COMPAT|IPV6_FLAG_HAS_PORT },
@@ -264,7 +320,12 @@ static void test_parsing (test_status_t* status) {
             TEST_FAILED("  Test is poorly defined, mask doesn't match the flag.");
         }
 
-        if (!ipv6_from_str(tests[i].input, strlen(tests[i].input), &parsed)) {
+        if (!ipv6_from_str_diag(
+                tests[i].input,
+                strlen(tests[i].input),
+                &parsed,
+                test_output_diag_fn,
+                NULL)) {
             TEST_FAILED("  ipv6_from_str failed\n");
         }
         else {
@@ -304,19 +365,6 @@ static void test_parsing (test_status_t* status) {
     }
 }
 
-// Function that is called by the address parser to report diagnostics
-static void test_parsing_diag_fn (
-    ipv6_diag_event_t event,
-    const ipv6_diag_info_t* info,
-    void* user_data)
-{
-    diag_test_capture_t* capture = (diag_test_capture_t*)user_data;
-
-    capture->event = event;
-    capture->message = info->message;
-    capture->calls++;
-}
-
 // CIDR negative tests:
 //
 // The following are NOT legal representations of the above prefix:
@@ -335,10 +383,14 @@ static void test_parsing_diag (test_status_t* status) {
         { "", IPV6_DIAG_INVALID_INPUT },      // invalid input
         { "-f::", IPV6_DIAG_INVALID_INPUT_CHAR }, // invalid character
         { "%f::", IPV6_DIAG_INVALID_INPUT }, // valid character wrong position
-        { "0:0", IPV6_DIAG_V6_BAD_COMPONENT_COUNT }, // too few components
+        { "0:0:0", IPV6_DIAG_V6_BAD_COMPONENT_COUNT }, // too few components
         { "0:0:0:0:0:0:0:0:0", IPV6_DIAG_V6_BAD_COMPONENT_COUNT }, // too many components
         { "0:::", IPV6_DIAG_INVALID_ABBREV }, // invalid abbreviation
         { "1ffff::", IPV6_DIAG_V6_COMPONENT_OUT_OF_RANGE }, // out of bounds separator
+        { "f", IPV6_DIAG_INVALID_INPUT },
+        { "f:f", IPV6_DIAG_INVALID_INPUT },
+        { "1:f", IPV6_DIAG_INVALID_INPUT },
+        { "f:1", IPV6_DIAG_INVALID_INPUT },
         { "ffff::/129", IPV6_DIAG_INVALID_CIDR_MASK }, // out of bounds CIDR mask
         { "[[f::]", IPV6_DIAG_INVALID_BRACKETS }, // invalid brackets
         { "[f::[", IPV6_DIAG_INVALID_BRACKETS }, // invalid brackets
@@ -350,7 +402,6 @@ static void test_parsing_diag (test_status_t* status) {
         { "ffff::1.2.3.4.5", IPV6_DIAG_V4_BAD_COMPONENT_COUNT }, // invalid octet count
         { "111.222.333.444", IPV6_DIAG_V4_COMPONENT_OUT_OF_RANGE }, // component is too large for IPv4
         { "111.222.255.255:70000", IPV6_DIAG_INVALID_PORT }, // port is too large
-        { "111.222.255:1010", IPV6_DIAG_V4_BAD_COMPONENT_COUNT }, // wrong number of components
     };
 
     for (uint32_t i = 0; i < LENGTHOF(tests); ++i) {
@@ -593,8 +644,8 @@ static void test_invalid_to_str(test_status_t* status) {
     ipv6_address_full_t address;
     const char* test_str = "::1:2:3:4:5";
     bool failed;
-    
-    if (!ipv6_from_str(test_str, strlen(test_str), &address)) {
+
+    if (!ipv6_from_str_diag(test_str, strlen(test_str), &address, test_output_diag_fn, NULL)) {
         TEST_FAILED("    ipv6_from_str failed for %s\n", test_str);
     }
     else {
