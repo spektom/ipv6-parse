@@ -63,6 +63,7 @@ if (NOT IPV6_PARSE_LIBRARY_ONLY)
     CHECK_INCLUDE_FILES(netinet/in.h HAVE_NETINET_IN_H)
     CHECK_INCLUDE_FILES(arpa/inet.h HAVE_ARPA_INET_H)
     CHECK_INCLUDE_FILES(ws2tcpip.h HAVE_WS_2_TCPIP_H)
+    CHECK_INCLUDE_FILES(assert.h HAVE_ASSERT_H)
 
     configure_file(ipv6_test_config.h.in ipv6_test_config.h)
     set(IPV6_TEST_CONFIG_HEADER_PATH ${CMAKE_CURRENT_BINARY_DIR})

@@ -20,6 +20,8 @@ License: MIT
   - CIDR notation `ffff::/80`
   - Port notation `[::1]:1119`
   - IPv4 `10.11.82.1`, `10.11.82.1:5555`, `10.0.0.0/8`
+  - IPv4 addresses with less than 4 octets (1 -> 0.0.0.1, 1.2 -> 1.0.0.2, 1.2.3 -> 1.2.0.3)
+  - Basic IPv4 with port 10.1:8080 -> 10.0.0.1:8080
   - Combinations of the above `[ffff::1.2.3.4/128]:1119`
 - Single function to parse both IPv4 and IPv6 addresses and ports
 - Rich diagnostic information regarding addresses formatting

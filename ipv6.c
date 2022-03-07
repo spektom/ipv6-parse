@@ -171,6 +171,31 @@ static const char* eventclass_str (eventclass_t input)
 //
 // Validate a condition in the parser state
 //
+//--------------------------------------------------------------------------------
+// Fix the components, if less that 4 components they should be left aligned
+// except for the last component.
+// 3       -> 0.0.0.3
+// 1.2     -> 1.0.0.2
+// 1.2.3   -> 1.2.0.3
+static void ipv4_fix_components (int32_t v4_octets, uint16_t components[IPV6_NUM_COMPONENTS])
+{
+    switch (v4_octets) {
+        case 1:
+            components[1] = components[0] >> 8;
+            components[0] = 0;
+            break;
+        case 2:
+            components[1] = components[0] & 0xff;
+            components[0] &= 0xff00;
+            break;
+        case 3:
+            components[1] >>= 8;
+            break;
+        default:
+            break;
+    }
+}
+
 #define VALIDATE(msg, diag, cond, action) \
     if (!(cond)) { \
         IPV6_TRACE("  failed '!" #cond "' in state: %s at position %d of '%s'\n\n", \
@@ -623,6 +648,59 @@ static void ipv6_state_transition (
 }
 
 //--------------------------------------------------------------------------------
+static bool ipv4_parse_single(ipv6_reader_state_t *state) {
+    // Special case single numbers as shortcut IPv4
+    state->v4_octets = 0;
+    state->components = 0;
+    state->address_full->flags |= IPV6_FLAG_IPV4_COMPAT;
+    state->address_full->address.components[0] = state->address_full->address.components[1] = 0;
+    state->token_position = 0;
+    state->token_len = state->input_bytes;
+
+    ipv4_parse_component(state);
+
+    if ((state->flags & READER_FLAG_ERROR) != 0) {
+        return false;
+    }
+
+    ipv4_fix_components(state->v4_octets, state->address_full->address.components);
+
+    return true;
+}
+
+//--------------------------------------------------------------------------------
+static bool ipv4_parse_single_port(ipv6_reader_state_t *state) {
+    // Special case single number with a port as a shortcut IPv4
+    //   treat the second component as the port
+    state->components = 0;
+    state->v4_octets = 0;
+    state->address_full->address.components[1] = 0;
+    state->address_full->flags |= IPV6_FLAG_IPV4_COMPAT | IPV6_FLAG_HAS_PORT;
+    char *port = strchr(state->input, ':');
+    if (!port) {
+        return false;
+    }
+
+    // re-parse the first octet as an IPV4 component
+    state->token_position = 0;
+    state->token_len = (int32_t)(port - state->input);
+    ipv4_parse_component(state);
+    if ((state->flags & READER_FLAG_ERROR) != 0) {
+        return false;
+    }
+
+    state->token_position = (int32_t)(port + 1 - state->input);
+    state->token_len = state->input_bytes - state->token_position;
+    ipvx_parse_port(state);
+    if ((state->flags & READER_FLAG_ERROR) != 0) {
+        return false;
+    }
+
+    ipv4_fix_components(state->v4_octets, state->address_full->address.components);
+    return true;
+}
+
+//--------------------------------------------------------------------------------
 bool IPV6_API_DEF(ipv6_from_str_diag) (
     const char* input,
     size_t input_bytes,
@@ -736,12 +814,8 @@ bool IPV6_API_DEF(ipv6_from_str_diag) (
     // If an IPv4 compatible address was specified the rest of the IPv6 collapsing
     // rules can be skipped
     if ((state.flags & READER_FLAG_IPV4_COMPAT) != 0) {
-        if (state.v4_octets != 4) {
-            ipv6_error(&state, IPV6_DIAG_V4_BAD_COMPONENT_COUNT,
-                "IPv4 compatible address was used but required 4 octets");
-            return false;
-        }
         state.address_full->flags |= IPV6_FLAG_IPV4_COMPAT;
+        ipv4_fix_components(state.v4_octets, state.address_full->address.components);
         return true;
     }
 
@@ -758,6 +832,13 @@ bool IPV6_API_DEF(ipv6_from_str_diag) (
 
     // If there was no abbreviated run all components should be specified
     if ((state.flags & READER_FLAG_ZERORUN) == 0) {
+
+        if (state.components == 1) {
+            return ipv4_parse_single(&state);
+        }
+        else if (state.components == 2) {
+            return ipv4_parse_single_port(&state);
+        }
         if (state.components < IPV6_NUM_COMPONENTS) {
             ipv6_error(&state, IPV6_DIAG_V6_BAD_COMPONENT_COUNT,
                 "Invalid component count");
@@ -814,7 +895,7 @@ bool IPV6_API_DEF(ipv6_from_str) (
 }
 
 #define OUTPUT_TRUNCATED() \
-    IPV6_TRACE("  ! buffer truncated at position %u\n", (uint32_t)(wp - out)); \
+    IPV6_TRACE("  ! buffer truncated at position %u\n", (uint32_t)(wp - output)); \
     output_bytes = 0; \
     *output = '\0';
 
@@ -843,26 +924,21 @@ size_t IPV6_API_DEF(ipv6_to_str) (
     // If the address is an IPv4 compatible address shortcut the IPv6 rules and 
     // print an address or address:port
     if (in->flags & IPV6_FLAG_IPV4_COMPAT) {
-        const uint32_t host_ipv4 = components[0] << 16 | components[1];
+        int32_t n = platform_snprintf(token, sizeof(token), "%d.%d.%d.%d",
+                          components[0] >> 8,
+                          components[0] & 0xff,
+                          components[1] >> 8,
+                          components[1] & 0xff);
+        // Add the port
         if (in->flags & IPV6_FLAG_HAS_PORT) {
-            platform_snprintf(token, sizeof(token), "%d.%d.%d.%d:%d",
-                (uint8_t)(host_ipv4 >> 24),
-                (uint8_t)(host_ipv4 >> 16),
-                (uint8_t)(host_ipv4 >> 8),
-                (uint8_t)(host_ipv4),
-                in->port);
-        } else {
-            platform_snprintf(token, sizeof(token), "%d.%d.%d.%d",
-                (uint8_t)(host_ipv4 >> 24),
-                (uint8_t)(host_ipv4 >> 16),
-                (uint8_t)(host_ipv4 >> 8),
-                (uint8_t)(host_ipv4));
+            platform_snprintf(token + n, sizeof(token) - n, ":%d", in->port);
         }
-        const char* cp = token;
+        const char *cp = token;
         while (wp < ep && *cp) {
             *wp++ = *cp++;
         }
 
+        // Terminate string
         output_bytes = (size_t)(ptrdiff_t)(wp - output);
         *wp++ = '\0';
         return output_bytes;
@@ -904,8 +980,8 @@ size_t IPV6_API_DEF(ipv6_to_str) (
         const char* cp = token;
 
         // Write out the last two components as the IPv4 embed
-        if (i == 6 && in->flags & IPV6_FLAG_IPV4_EMBED) {
-            const uint32_t host_ipv4 = components[6] << 16 | components[7];
+        if (i == IPV4_EMBED_INDEX && in->flags & IPV6_FLAG_IPV4_EMBED) {
+            const uint32_t host_ipv4 = components[IPV4_EMBED_INDEX] << 16 | components[IPV4_EMBED_INDEX + 1];
             platform_snprintf(
                 token,
                 sizeof(token),
